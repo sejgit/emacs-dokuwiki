@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.1
+;; Version: 1.2.2
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -131,22 +131,30 @@ when saving."
   (replace-regexp-in-string dokuwiki--dwiki-suffix-regexp ""
                             (buffer-name buffer)))
 
-;;;###autoload
-(defun dokuwiki-login ()
-  "Connects to the dokuwiki."
-  (interactive)
-  (let* ((xml-rpc-url (dokuwiki--get-xml-rpc-url))
-         (credentials (dokuwiki--credentials))
+(defun dokuwiki--xmlrpc-authenticate ()
+  "Establish an XML-RPC session with the wiki.  Returns non-nil on success."
+  (let* ((credentials (dokuwiki--credentials))
          (login-user-name (plist-get credentials :user))
          (login-password (plist-get credentials :password)))
-    (if (not (dokuwiki--xmlrpc-login login-user-name login-password))
-      (error "Login unsuccessful! Check if your dokuwiki-xml-rpc-url or login credentials are correct!")
-      (message "Login successful!")
-      (when dokuwiki-use-dokuwiki-mode
-        (unless (featurep 'dokuwiki-mode)
-          (user-error "Dokuwiki-mode not installed: can't enable dokuwiki-mode"))
+    (dokuwiki--xmlrpc-login login-user-name login-password)))
+
+(defun dokuwiki--maybe-enable-dokuwiki-mode ()
+  "Register `dokuwiki-mode' on `dokuwiki-page-opened-hook' when configured."
+  (when dokuwiki-use-dokuwiki-mode
+    (if (featurep 'dokuwiki-mode)
         (unless (member #'dokuwiki-mode dokuwiki-page-opened-hook)
-          (add-hook #'dokuwiki-page-opened-hook #'dokuwiki-mode))))))
+          (add-hook #'dokuwiki-page-opened-hook #'dokuwiki-mode))
+      (warn "dokuwiki-mode is not installed; install it or set `dokuwiki-use-dokuwiki-mode' to nil"))))
+
+;;;###autoload
+(defun dokuwiki-login ()
+  "Connect to the wiki and optionally enable `dokuwiki-mode' on open."
+  (interactive)
+  (dokuwiki--get-xml-rpc-url)
+  (if (not (dokuwiki--xmlrpc-authenticate))
+      (error "Login unsuccessful! Check if your dokuwiki-xml-rpc-url or login credentials are correct!")
+    (message "Login successful!")
+    (dokuwiki--maybe-enable-dokuwiki-mode)))
 
 (defun dokuwiki--insert-top-heading (page-name)
   "When there's no content, insert a top level heading matching PAGE-NAME."
@@ -297,11 +305,12 @@ Returns the result of xml-rpc-method-call."
                              ;; First try
                              (funcall call-func)
                              (error
-                               (if (string-match "401\\|Unauthorized" (error-message-string err))
+                               (if (string-match "401\\|403\\|Unauthorized\\|Forbidden"
+                                                 (error-message-string err))
                                  (progn
                                    (message "Authentication required. Logging in...")
-                                   (dokuwiki-login)
-                                   ;; Retry the call after trying to log in
+                                   (unless (dokuwiki--xmlrpc-authenticate)
+                                     (error "Login unsuccessful! Check dokuwiki-xml-rpc-url and credentials"))
                                    (funcall call-func))
                                  (signal (car err) (cdr err))))))))
 
