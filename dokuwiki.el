@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.5
+;; Version: 1.2.6
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -285,64 +285,81 @@ DokuWiki often answers HTTP Basic (from auth-source) with 403 on xmlrpc.php."
           (url-http-proxy-basic-auth-storage nil))
       (funcall fn))))
 
-(defun dokuwiki--xmlrpc-build-call (method params)
-  "Build an XML-RPC `methodCall' tree for METHOD and PARAMS."
-  (let* ((m-name (if (stringp method) method (symbol-name method)))
-         (m-params
-          (mapcar (lambda (p)
-                    `(param nil ,(car (xml-rpc-value-to-xml-list p))))
-                  params)))
-    `((methodCall nil (methodName nil ,m-name)
-                   ,(append '(params nil) m-params)))))
+(defun dokuwiki--xmlrpc-http-response-ok-p ()
+  "Return t if the current HTTP buffer contains an XML-RPC response body."
+  (save-excursion
+    (goto-char (point-min))
+    (or (search-forward "<methodResponse>" nil t)
+        (search-forward "<?xml" nil t))))
 
-(defun dokuwiki--xmlrpc-request (server-url xml)
-  "POST XML to SERVER-URL like `xml-rpc-request', but parse XML on HTTP 401/403."
-  (dokuwiki--with-xmlrpc-http-session
-   (lambda ()
-     (let ((url-request-method "POST")
-           (url-package-name "xml-rpc.el")
-           (url-package-version xml-rpc-version)
-           (url-request-data
-            (concat "<?xml version=\"1.0\""
-                    " encoding=\"UTF-8\"?>\n"
-                    (with-temp-buffer
-                      (xml-print xml)
-                      (if xml-rpc-allow-unicode-string
-                          (encode-coding-string
-                           (encode-coding-string (buffer-string) 'utf-8)
-                           'raw-text t)
-                        (buffer-string)))
-                    "\n"))
-           (url-mime-charset-string "utf-8;q=1, iso-8859-1;q=0.5")
-           (url-request-coding-system xml-rpc-use-coding-system)
-           (url-http-attempt-keepalives t)
-           (url-request-extra-headers
-            (append
-             (list (cons "Connection" "close")
-                   ;; DokuWiki 2024+ (Kaos) rejects charset in Content-Type; see GH-4218.
-                   (cons "Content-Type" "text/xml"))
-             xml-rpc-request-extra-headers))
-           (buffer (url-retrieve-synchronously server-url)))
-       (with-current-buffer buffer
-         (when (and (numberp url-http-response-status)
-                    (> url-http-response-status 299)
-                    (not (save-excursion
-                           (goto-char (point-min))
-                           (or (search-forward "<methodResponse>" nil t)
-                               (search-forward "<?xml" nil t)))))
-           (error "Error during request: %s" url-http-response-status)))
-       (xml-rpc-request-process-buffer buffer)))))
+(defun dokuwiki--xmlrpc-http-request (server-url xml &optional async-callback-function)
+  "Like `xml-rpc-request' with DokuWiki-friendly headers and fault bodies on 401."
+  (unwind-protect
+      (save-excursion
+        (let ((url-request-method "POST")
+              (url-package-name "xml-rpc.el")
+              (url-package-version xml-rpc-version)
+              (url-request-data
+               (concat "<?xml version=\"1.0\""
+                       " encoding=\"UTF-8\"?>\n"
+                       (with-temp-buffer
+                         (xml-print xml)
+                         (if xml-rpc-allow-unicode-string
+                             (encode-coding-string
+                              (encode-coding-string (buffer-string) 'utf-8)
+                              'raw-text t)
+                           (buffer-string)))
+                       "\n"))
+              (url-mime-charset-string "utf-8;q=1, iso-8859-1;q=0.5")
+              (url-request-coding-system xml-rpc-use-coding-system)
+              (url-http-attempt-keepalives t)
+              (url-request-extra-headers
+               (append
+                (list (cons "Connection" "close")
+                      ;; Kaos compares Content-Type strictly; see DokuWiki GH-4218.
+                      (cons "Content-Type" "text/xml"))
+                xml-rpc-request-extra-headers)))
+          (when (> xml-rpc-debug 1)
+            (print url-request-data (create-file-buffer "request-data")))
+          (cond ((boundp 'url-be-asynchronous)
+                 (if async-callback-function
+                     (setq url-be-asynchronous t
+                           url-current-callback-data
+                           (list async-callback-function (current-buffer))
+                           url-current-callback-func
+                           'xml-rpc-request-callback-handler)
+                   (setq url-be-asynchronous nil))
+                 (url-retrieve server-url t)
+                 (when (not url-be-asynchronous)
+                   (let ((result (xml-rpc-request-process-buffer (current-buffer))))
+                     (when (> xml-rpc-debug 1)
+                       (print result (create-file-buffer "result-data")))
+                     result)))
+                (t
+                 (if async-callback-function
+                     (let ((cbargs (list async-callback-function)))
+                       (url-retrieve server-url
+                                     'xml-rpc-new-request-callback-handler
+                                     cbargs))
+                   (let ((buffer (url-retrieve-synchronously server-url)))
+                     (with-current-buffer buffer
+                       (when (not (numberp url-http-response-status))
+                         (error "Why? url-http-response-status is %s"
+                                url-http-response-status))
+                       (when (and url-http-response-status
+                                  (> url-http-response-status 299)
+                                  (not (dokuwiki--xmlrpc-http-response-ok-p)))
+                         (error "Error during request: %s"
+                                url-http-response-status)))
+                     (xml-rpc-request-process-buffer buffer))))))))
 
 (defun dokuwiki--xmlrpc-method-call (server-url method &rest params)
-  "Call METHOD at SERVER-URL via `dokuwiki--xmlrpc-request'."
-  (let ((response
-         (dokuwiki--xmlrpc-request
-          server-url
-          (dokuwiki--xmlrpc-build-call method params))))
-    (cond ((stringp response)
-           (list (cons nil (concat "URL/HTTP Error: " response))))
-          (t
-           (xml-rpc-xml-to-response response)))))
+  "Call stock `xml-rpc-method-call' with DokuWiki HTTP/session adjustments."
+  (dokuwiki--with-xmlrpc-http-session
+   (lambda ()
+     (cl-letf (((symbol-function 'xml-rpc-request)
+                #'dokuwiki--xmlrpc-http-request))
+       (apply #'xml-rpc-method-call server-url method params)))))
 
 (defun dokuwiki--xmlrpc-login (username password)
   "Login to the Dokuwiki XML-RPC API.
