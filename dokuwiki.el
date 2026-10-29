@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.0
+;; Version: 1.2.1
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -25,7 +25,7 @@
 
 ;;; License:
 
-;; This program is free software; you can redistributfe it and/or
+;; This program is free software; you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License
 ;; as published by the Free Software Foundation; either version 3
 ;; of the License, or (at your option) any later version.
@@ -45,7 +45,7 @@
 (require 'xml-rpc)
 (require 'ffap)
 (require 'auth-source)
-(require 'dokuwiki-mode)
+(require 'cl-lib)
 
 (defgroup dokuwiki nil
   "Edit remote Dokuwiki pages using XML-RPC."
@@ -116,6 +116,21 @@ when saving."
   :group 'dokuwiki
   :type 'boolean)
 
+(defconst dokuwiki--dwiki-suffix-regexp "\\.dwiki\\'"
+  "Regexp matching the `.dwiki' suffix on wiki edit buffers.")
+
+(defvar-local dokuwiki--buffer-setup nil
+  "Non-nil when `dokuwiki-setup' has been run in the current buffer.")
+
+(defun dokuwiki--dwiki-buffer-p (&optional buffer)
+  "Return t if BUFFER (defaults to current) is a `.dwiki' wiki edit buffer."
+  (string-match-p dokuwiki--dwiki-suffix-regexp (buffer-name buffer)))
+
+(defun dokuwiki--page-id-from-buffer-name (&optional buffer)
+  "Return the wiki page id implied by BUFFER's name (defaults to current)."
+  (replace-regexp-in-string dokuwiki--dwiki-suffix-regexp ""
+                            (buffer-name buffer)))
+
 ;;;###autoload
 (defun dokuwiki-login ()
   "Connects to the dokuwiki."
@@ -127,16 +142,15 @@ when saving."
     (if (not (dokuwiki--xmlrpc-login login-user-name login-password))
       (error "Login unsuccessful! Check if your dokuwiki-xml-rpc-url or login credentials are correct!")
       (message "Login successful!")
-      (if dokuwiki-use-dokuwiki-mode
-        (if (featurep 'dokuwiki-mode)
-          (add-hook #'dokuwiki-page-opened-hook #'dokuwiki-mode)
-          (user-error "Dokuwiki-mode not installed: can't enable dokuwiki-mode"))))))
+      (when dokuwiki-use-dokuwiki-mode
+        (unless (featurep 'dokuwiki-mode)
+          (user-error "Dokuwiki-mode not installed: can't enable dokuwiki-mode"))
+        (unless (member #'dokuwiki-mode dokuwiki-page-opened-hook)
+          (add-hook #'dokuwiki-page-opened-hook #'dokuwiki-mode))))))
 
 (defun dokuwiki--insert-top-heading (page-name)
-  "When there's no content, we want a top level heading matching PAGE-NAME."
-   (with-current-buffer
-       (get-buffer (concat page-name ".dwiki")))
-       (insert "====== " (replace-regexp-in-string ".*:" "" page-name ) " ======"))
+  "When there's no content, insert a top level heading matching PAGE-NAME."
+  (insert "====== " (replace-regexp-in-string ".*:" "" page-name) " ======"))
 
 ;;;###autoload
 (defun dokuwiki-open-page (page-name-or-url)
@@ -178,20 +192,20 @@ buffer is saved."
            (conspath (dokuwiki-path))
            (namespace (car conspath))
            (page-name (cdr conspath))
-           (dir (apply
-                  #'file-name-concat
-                  dokuwiki-local-directory
-                  namespace))
+           (dir (if namespace
+                    (apply #'file-name-concat dokuwiki-local-directory namespace)
+                  dokuwiki-local-directory))
            (ext (or (let (value)
                       (dolist (entry dokuwiki-preferred-mode-alist)
                         (if (eq (car entry) mode)
                           (setq value (cadadr entry))))
                       value)
                     "dwiki"))
-           (file (concat page-name "." ext)))
-      (make-directory dir t) ; Create parent dir(s) if necessary.
-      (write-file (file-name-concat dir file))
-      (set-visited-file-name (buffer-name))
+           (file (concat page-name "." ext))
+           (local-file (file-name-concat dir file)))
+      (make-directory dir t)
+      (write-file local-file)
+      (set-visited-file-name local-file)
       (funcall mode)
       (dokuwiki-save-page))))
 
@@ -202,17 +216,19 @@ Uses the buffer name as the page name.  A buffer of \"wiki-page.dwiki\"
 is saved as \"wikiurl.com/wiki-page\".  On the other hand, a buffer of
 \"namespace:wiki-page.dwiki\" is saved as \"wikiurl.com/namespace:wiki-page\""
   (interactive)
-  (if (not (string-match-p ".dwiki" (buffer-name)))
-    (error "The current buffer is not a .dwiki buffer")
-    (let ((page-name (replace-regexp-in-string ".dwiki" "" (buffer-name))))
-      (if (not (y-or-n-p (concat "Do you want to save the page \"" page-name "\"?")))
-        (message "Cancelled saving of the page."))
-      (let* ((summary (read-string "Summary: "))
-             (minor (y-or-n-p "Is this a minor change? "))
-             (save-success (dokuwiki--xmlrpc-call 'wiki.putPage page-name (buffer-string) `(("sum" . ,summary) ("minor" . ,minor)))))
-        (if save-success
+  (unless (dokuwiki--dwiki-buffer-p)
+    (error "The current buffer is not a .dwiki buffer"))
+  (let ((page-name (dokuwiki--page-id-from-buffer-name)))
+    (unless (y-or-n-p (concat "Do you want to save the page \"" page-name "\"?"))
+      (user-error "Cancelled saving of the page"))
+    (let* ((summary (read-string "Summary: "))
+           (minor (y-or-n-p "Is this a minor change? "))
+           (save-success
+            (dokuwiki--xmlrpc-call 'wiki.putPage page-name (buffer-string)
+                                   `(("sum" . ,summary) ("minor" . ,minor)))))
+      (if save-success
           (message "Saving successful with summary %s and minor of %s." summary minor)
-          (error "Saving unsuccessful!"))))))
+        (error "Saving unsuccessful!")))))
 
 (defun dokuwiki-get-wiki-title ()
   "Gets the title of the current wiki."
@@ -220,14 +236,14 @@ is saved as \"wikiurl.com/wiki-page\".  On the other hand, a buffer of
   (let ((dokuwiki-title (dokuwiki--xmlrpc-call 'dokuwiki.getTitle)))
     (message "The title of the wiki is \"%s\"" dokuwiki-title)))
 
+(defun dokuwiki--fetch-page-ids ()
+  "Return a list of page id strings from the remote wiki."
+  (mapcar (lambda (page-detail) (cdr (assoc "id" page-detail)))
+          (dokuwiki--xmlrpc-call 'wiki.getAllPages)))
+
 (defun dokuwiki-get-page-list ()
-  "Extract 'id' from page info."
-  (let ((page-detail-list (dokuwiki--xmlrpc-call 'wiki.getAllPages))
-        (page-list ()))
-    (progn
-      (dolist (page-detail page-detail-list)
-        (push (cdr (assoc "id" page-detail)) page-list))
-      page-list)))
+  "Return page ids from the remote wiki."
+  (dokuwiki--fetch-page-ids))
 
 (defun dokuwiki-list-pages ()
   "Show a selectable list containing pages from the current wiki.  Not cached."
@@ -235,12 +251,16 @@ is saved as \"wikiurl.com/wiki-page\".  On the other hand, a buffer of
   (dokuwiki-open-page (completing-read "Select a page to open: " (dokuwiki-get-page-list))))
 
 (defun dokuwiki-path ()
-  "Get the path of the current page."
-  (let* ((bfr-name (buffer-name))
-         (_ (string-match "^\\(.+\\):\\(.+\\)\\.dwiki$" bfr-name))
-         (namespace (match-string 1 bfr-name))
-         (page-name (match-string 2 bfr-name)))
-    (cons namespace page-name)))
+  "Get the path of the current page as (NAMESPACE . PAGE-NAME).
+NAMESPACE is nil for top-level pages (e.g. buffer \"start.dwiki\")."
+  (let ((bfr-name (buffer-name)))
+    (cond
+     ((string-match "^\\(.+\\):\\(.+\\)\\.dwiki$" bfr-name)
+      (cons (match-string 1 bfr-name) (match-string 2 bfr-name)))
+     ((string-match "^\\(.+\\)\\.dwiki$" bfr-name)
+      (cons nil (match-string 1 bfr-name)))
+     (t
+      (error "Not a dokuwiki buffer: %s" bfr-name)))))
 
 (defun dokuwiki-insert-link-from-list ()
   "Insert link from wiki page list.  Not cached."
@@ -253,7 +273,7 @@ is saved as \"wikiurl.com/wiki-page\".  On the other hand, a buffer of
 USERNAME is the username to use for logging in.
 PASSWORD is the password to use for logging in.
 Returns the result of the XML-RPC call, or nil if the login failed."
-  (xml-rpc-method-call dokuwiki-xml-rpc-url
+  (xml-rpc-method-call (dokuwiki--get-xml-rpc-url)
                        'dokuwiki.login
                        username
                        password))
@@ -265,8 +285,11 @@ METHOD is the XML-RPC method to call (e.g. 'wiki.getPage).
 PARAMS are the optional parameters to pass to the method as multiple arguments.
 
 Returns the result of xml-rpc-method-call."
-  (let ((call-func (lambda ()
-                    (apply #'xml-rpc-method-call (cons dokuwiki-xml-rpc-url (cons method params))))))
+  (let ((rpc-url (dokuwiki--get-xml-rpc-url))
+        (call-func nil))
+    (setq call-func
+          (lambda ()
+            (apply #'xml-rpc-method-call (cons rpc-url (cons method params)))))
     ;; nullify 'url-get-authentication' to avoid authentication prompts
     (cl-letf (((symbol-function 'url-get-authentication)
                (lambda (&rest _args) nil)))
@@ -319,19 +342,19 @@ the `dokuwiki-save' wrapper function."
         (list :user user :password password)))))
 
 (defun dokuwiki--enable-preferred-mode ()
-  "If the predicate associated with an entry in `dokuwiki-preferred-mode-alist'
-returns t, enable the major mode specified by that entry."
-  (dolist (entry dokuwiki-preferred-mode-alist)
-    (let ((mode (car entry))
-          (fun (caadr entry)))
-      (if (funcall fun)
-          (progn
-            (funcall mode)
-            (let* ((mode-name (symbol-name mode))
-                   (root (substring mode-name 0 -5)))
-              (use-local-map
-               (symbol-value
-                (intern (concat "dokuwiki-" root "-map"))))))))))
+  "Enable the first major mode in `dokuwiki-preferred-mode-alist' whose predicate passes."
+  (cl-loop for entry in dokuwiki-preferred-mode-alist
+           for mode = (car entry)
+           for fun = (caadr entry)
+           when (funcall fun)
+           do (progn
+                (funcall mode)
+                (let* ((mode-name (symbol-name mode))
+                       (root (substring mode-name 0 -5)))
+                  (use-local-map
+                   (symbol-value
+                    (intern (concat "dokuwiki-" root "-map")))))
+           and return t)))
 
 (defun dokuwiki--get-xml-rpc-url ()
   "Gets the xml-rpc to be used for logging in."
@@ -349,28 +372,29 @@ returns t, enable the major mode specified by that entry."
 
 ;; caching
 (defvar dokuwiki-cached-page-list nil
-  "List of all pages cached for quick linking and listing.")
+  "List of wiki page id strings cached for listing and link completion.")
 
 ;;;###autoload
 (defun dokuwiki-pages-get-list-cache (&optional refresh)
   "Get list of page; if cache is unset or REFRESH, fetch."
   (when (or (not dokuwiki-cached-page-list) refresh)
-    (let ((page-detail-list (dokuwiki--xmlrpc-call 'wiki.getAllPages))
-          (page-list ()))
-      (dolist (page-detail page-detail-list)
-        (push (concat ":" (cdr (assoc "id" page-detail))) page-list))
-      (setq dokuwiki-cached-page-list page-list)
-      ;; let user know cache is updated
-      (message "Cached page list updated.")
-      (sit-for 1)))
+    (setq dokuwiki-cached-page-list (dokuwiki--fetch-page-ids))
+    (message "Cached page list updated.")
+    (sit-for 1))
   dokuwiki-cached-page-list)
+
+(defun dokuwiki--page-link-candidates ()
+  "Return page ids prefixed with \":\" for link completion and insertion."
+  (mapcar (lambda (id) (concat ":" id)) dokuwiki-cached-page-list))
 
 (defun dokuwiki-insert-link-from-cache ()
   "Show a selectable list containing pages from the current wiki.
-Refresh when univesal arg."
+Refresh when universal arg."
   (interactive)
-  (if-let (page (completing-read "Select a page to link: " (dokuwiki-pages-get-list-cache current-prefix-arg)))
-      (insert (concat "[[:" page "]] "))))
+  (dokuwiki-pages-get-list-cache current-prefix-arg)
+  (if-let (page (completing-read "Select a page to link: "
+                                  (dokuwiki--page-link-candidates)))
+      (insert (concat "[[" page "]] "))))
 
 (defun dokuwiki-list-pages-cached (arg)
   "Show a selectable list containing pages from the current wiki.
@@ -404,20 +428,20 @@ Start search at PT."
       (skip-syntax-backward "^ ")
       (max (point) this-line))))
 
-(defun  dokuwiki--capf-link-wrap (comp-string status)
-"When capf STATUS is finished, make the COMP-STRING into a link.
-NB COMP-STRING not used: link-wrap using point instead."
-  (when (eq status 'finished) (dokuwiki-link-wrap)))
+(defun dokuwiki--capf-link-wrap (_comp-string status)
+  "When capf STATUS is finished, wrap the completed text as a wiki link."
+  (when (eq status 'finished)
+    (dokuwiki-link-wrap)))
 
 (defun dokuwiki--capf ()
-  "Use DOKUWIKI-CACHED-PAGE-LIST for completion.
-Wrap as link when finished."
-  (when (and dokuwiki-cached-page-list (looking-back ":[a-zA-Z:]+" (-(point)(line-beginning-position))))
-    ;; (looking-back ":[a-zA-Z:]+" (-(point)(line-beginning-position)) t)
-    (list (dokuwiki--back-to-space-or-line (match-beginning 0))
-          (match-end 0)
-          dokuwiki-cached-page-list
-          :exit-function #'dokuwiki--capf-link-wrap)))
+  "Use cached page ids for \":\"-prefixed link completion; wrap when finished."
+  (when dokuwiki-cached-page-list
+    (let ((limit (- (point) (line-beginning-position))))
+      (when (looking-back ":[-a-zA-Z0-9_:.]+" limit)
+        (list (dokuwiki--back-to-space-or-line (match-beginning 0))
+              (match-end 0)
+              (dokuwiki--page-link-candidates)
+              :exit-function #'dokuwiki--capf-link-wrap)))))
 
 (defun dokuwiki--full-path (any-path)
   "Return full path for dokuwiki PATH."
@@ -435,14 +459,18 @@ Wrap as link when finished."
       any-path)
     (let ((namespace (car (dokuwiki-path))))
       (if (string-match ":" any-path)
-        (cond
-          ((string-match "^\\.:\\(.*\\)" any-path)
-           (concat namespace ":" (match-string 1 any-path)))
-          ((string-match "^[a-z0-9]" any-path)
-           any-path)
-          (t
+          (cond
+           ((string-match "^\\.:\\(.*\\)" any-path)
+            (if namespace
+                (concat namespace ":" (match-string 1 any-path))
+              (match-string 1 any-path)))
+           ((string-match "^[a-z0-9]" any-path)
+            any-path)
+           (t
             (error "Invalid path: %s" any-path)))
-        (concat namespace ":" any-path)))))
+        (if namespace
+            (concat namespace ":" any-path)
+          any-path)))))
 
 ;;; links
 (defun dokuwiki--fwpap (&optional at-point)
@@ -464,15 +492,20 @@ NB text is :a:b not /a/b but same file pattern rules apply."
   (interactive)
   (dokuwiki-open-page (dokuwiki--fwpap)))
 
+(defun dokuwiki--ffap-path (_event)
+  "Open the wiki link at the mouse click location."
+  (interactive "e")
+  (dokuwiki-ffap))
+
 ;;; clickable links
 ;; generated with:
 ;; (if (featurep 'button-lock) (button-lock-set-button "[[.*?]]" 'dokuwiki--ffap-path))
 (defvar dokuwiki-font-lock-link
   '("\\[\\[.*?\\]\\]"
-   (0 ’(face button-lock-face keymap (keymap (mouse-1 . dokuwiki--ffap-path))
-             button-lock t mouse-face button-lock-mouse-face rear-nonsticky t)
+    (0 '(face button-lock-face keymap (keymap (mouse-1 . dokuwiki--ffap-path))
+            button-lock t mouse-face button-lock-mouse-face rear-nonsticky t)
        append))
-  "Make a link clickable.")
+  "Font-lock keywords to make `[[wiki links]]' clickable.")
 
 ;; This is an alias for 'dokuwiki-list-pages-cached'
 ;;;###autoload
@@ -482,32 +515,28 @@ NB text is :a:b not /a/b but same file pattern rules apply."
   (dokuwiki-list-pages-cached current-prefix-arg))
 
 (defun dokuwiki-in-browser ()
-  "Open current page in the borwser.  Assumes fixed xmlrpc url suffixe."
+  "Open current page in the browser.  Assumes fixed xmlrpc URL suffix."
   (interactive)
-  (let ((base-url (replace-regexp-in-string "/lib/exe/xmlrpc.php" "/doku.php" dokuwiki-xml-rpc-url))
-        (page-name (replace-regexp-in-string ".dwiki$" "" (buffer-name))))
+  (let* ((base-url (replace-regexp-in-string "/lib/exe/xmlrpc.php" "/doku.php"
+                                             (dokuwiki--get-xml-rpc-url)))
+         (page-name (dokuwiki--page-id-from-buffer-name)))
     (browse-url (concat base-url "?id=" page-name))))
 
 ;;; default bindings and hooks
 (defun dokuwiki-setup ()
-  "Provide suggested default keys bindings.
-Note: dokuwiki-mode is a separate package, modifying it's map."
+  "Provide suggested default key bindings for the current wiki buffer.
+Note: dokuwiki-mode is a separate package, modifying its map."
   (interactive)
-  (eval-after-load 'dokuwiki
-    '(progn
-       ;; complete links as they are typed if starting with ':'
-       (add-hook 'completion-at-point-functions 'dokuwiki--capf nil 'local)
-
-       ;; not sure how to get new font locking (links as buttons) to work
-       ;; (add-hook 'dokuwiki-mode (lambda () (font-lock-add-keywords nil dokuwiki-font-lock-link)))
-
-       ;; push local bindings on the buffer
-       ;; reviously updated dokuwiki-mode-map. but that messes up zim-wiki-mode
-       (local-set-key (kbd "C-c g") #'dokuwiki-list-pages-cached)
-       (local-set-key (kbd "C-c s") #'dokuwiki-save-page)
-       (local-set-key (kbd "C-c o") #'dokuwiki-ffap)
-       (local-set-key (kbd "C-c b") #'dokuwiki-in-browser)
-       (local-set-key (kbd "C-c l") #'dokuwiki-insert-link-from-cache))))
+  (unless dokuwiki--buffer-setup
+    (setq dokuwiki--buffer-setup t)
+    (add-hook 'completion-at-point-functions #'dokuwiki--capf nil t)
+    ;; not sure how to get new font locking (links as buttons) to work
+    ;; (font-lock-add-keywords nil dokuwiki-font-lock-link)
+    (local-set-key (kbd "C-c g") #'dokuwiki-list-pages-cached)
+    (local-set-key (kbd "C-c s") #'dokuwiki-save-page)
+    (local-set-key (kbd "C-c o") #'dokuwiki-ffap)
+    (local-set-key (kbd "C-c b") #'dokuwiki-in-browser)
+    (local-set-key (kbd "C-c l") #'dokuwiki-insert-link-from-cache)))
 
 
 (provide 'dokuwiki)
