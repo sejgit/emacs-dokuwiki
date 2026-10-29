@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.6
+;; Version: 1.2.7
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -351,7 +351,7 @@ DokuWiki often answers HTTP Basic (from auth-source) with 403 on xmlrpc.php."
                                   (not (dokuwiki--xmlrpc-http-response-ok-p)))
                          (error "Error during request: %s"
                                 url-http-response-status)))
-                     (xml-rpc-request-process-buffer buffer))))))))
+                     (xml-rpc-request-process-buffer buffer)))))))))
 
 (defun dokuwiki--xmlrpc-method-call (server-url method &rest params)
   "Call stock `xml-rpc-method-call' with DokuWiki HTTP/session adjustments."
