@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.4
+;; Version: 1.2.5
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -319,7 +319,8 @@ DokuWiki often answers HTTP Basic (from auth-source) with 403 on xmlrpc.php."
            (url-request-extra-headers
             (append
              (list (cons "Connection" "close")
-                   (cons "Content-Type" "text/xml; charset=utf-8"))
+                   ;; DokuWiki 2024+ (Kaos) rejects charset in Content-Type; see GH-4218.
+                   (cons "Content-Type" "text/xml"))
              xml-rpc-request-extra-headers))
            (buffer (url-retrieve-synchronously server-url)))
        (with-current-buffer buffer
@@ -354,9 +355,9 @@ Returns the result of the XML-RPC call, or nil if the login failed."
                                 password))
 
 (defun dokuwiki--rpc-auth-error-p (err)
-  "Return t if ERR looks like an XML-RPC or HTTP auth failure."
+  "Return t if ERR looks like an HTTP or XML-RPC auth failure."
   (string-match
-   "401\\|403\\|Unauthorized\\|Forbidden\\|not authorized\\|XML-RPC fault"
+   "401\\|403\\|Unauthorized\\|Forbidden\\|not authorized to call"
    (error-message-string err)))
 
 (defun dokuwiki--xmlrpc-call (method &rest params)
