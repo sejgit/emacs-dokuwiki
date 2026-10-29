@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.8
+;; Version: 1.2.9
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -139,12 +139,14 @@ when saving."
     (dokuwiki--xmlrpc-login login-user-name login-password)))
 
 (defun dokuwiki--maybe-enable-dokuwiki-mode ()
-  "Register `dokuwiki-mode' on `dokuwiki-page-opened-hook' when configured."
-  (when dokuwiki-use-dokuwiki-mode
-    (if (featurep 'dokuwiki-mode)
-        (unless (member #'dokuwiki-mode dokuwiki-page-opened-hook)
-          (add-hook #'dokuwiki-page-opened-hook #'dokuwiki-mode))
-      (warn "dokuwiki-mode is not installed; install it or set `dokuwiki-use-dokuwiki-mode' to nil"))))
+  "Warn when `dokuwiki-use-dokuwiki-mode' is set but the mode is missing."
+  (when (and dokuwiki-use-dokuwiki-mode (not (featurep 'dokuwiki-mode)))
+    (warn "dokuwiki-mode is not installed; install it or set `dokuwiki-use-dokuwiki-mode' to nil")))
+
+(defun dokuwiki--enable-wiki-major-mode ()
+  "Enable `dokuwiki-mode' in the current buffer when configured."
+  (when (and dokuwiki-use-dokuwiki-mode (featurep 'dokuwiki-mode))
+    (dokuwiki-mode)))
 
 ;;;###autoload
 (defun dokuwiki-login ()
@@ -184,11 +186,14 @@ buffer is saved."
     (erase-buffer)
     (if page-content (insert page-content) (dokuwiki--insert-top-heading page-name))
     (goto-char (point-min))
-    (if dokuwiki-use-preferred-modes
-      (progn
-        (dokuwiki--create-preferred-mode-maps)
-        (dokuwiki--enable-preferred-mode)))
-    (run-hooks #'dokuwiki-page-opened-hook)))
+    (let ((used-preferred
+           (and dokuwiki-use-preferred-modes
+                (progn
+                  (dokuwiki--create-preferred-mode-maps)
+                  (dokuwiki--enable-preferred-mode)))))
+      (unless used-preferred
+        (dokuwiki--enable-wiki-major-mode))
+      (run-hooks #'dokuwiki-page-opened-hook))))
 
 (defun dokuwiki-save ()
   "Wrapper for `dokuwiki-save-page', saving local copy of page if
@@ -613,20 +618,36 @@ NB text is :a:b not /a/b but same file pattern rules apply."
     (browse-url (concat base-url "?id=" page-name))))
 
 ;;; default bindings and hooks
+(defvar dokuwiki--mode-bindings-hook-registered nil
+  "Non-nil after `dokuwiki--register-mode-bindings-hook' has run.")
+
+(defun dokuwiki--apply-buffer-bindings ()
+  "Bind DokuWiki editing keys in the current buffer."
+  (local-set-key (kbd "C-c g") #'dokuwiki-list-pages-cached)
+  (local-set-key (kbd "C-c s") #'dokuwiki-save-page)
+  (local-set-key (kbd "C-c o") #'dokuwiki-ffap)
+  (local-set-key (kbd "C-c b") #'dokuwiki-in-browser)
+  (local-set-key (kbd "C-c l") #'dokuwiki-insert-link-from-cache))
+
+(defun dokuwiki--register-mode-bindings-hook ()
+  "Re-apply wiki keys whenever `dokuwiki-mode' is turned on."
+  (unless dokuwiki--mode-bindings-hook-registered
+    (setq dokuwiki--mode-bindings-hook-registered t)
+    (with-eval-after-load 'dokuwiki-mode
+      (add-hook 'dokuwiki-mode-hook #'dokuwiki--apply-buffer-bindings))))
+
 (defun dokuwiki-setup ()
   "Provide suggested default key bindings for the current wiki buffer.
 Note: dokuwiki-mode is a separate package, modifying its map."
   (interactive)
+  (dokuwiki--register-mode-bindings-hook)
   (unless dokuwiki--buffer-setup
     (setq dokuwiki--buffer-setup t)
     (add-hook 'completion-at-point-functions #'dokuwiki--capf nil t)
     ;; not sure how to get new font locking (links as buttons) to work
     ;; (font-lock-add-keywords nil dokuwiki-font-lock-link)
-    (local-set-key (kbd "C-c g") #'dokuwiki-list-pages-cached)
-    (local-set-key (kbd "C-c s") #'dokuwiki-save-page)
-    (local-set-key (kbd "C-c o") #'dokuwiki-ffap)
-    (local-set-key (kbd "C-c b") #'dokuwiki-in-browser)
-    (local-set-key (kbd "C-c l") #'dokuwiki-insert-link-from-cache)))
+    )
+  (dokuwiki--apply-buffer-bindings))
 
 
 (provide 'dokuwiki)
