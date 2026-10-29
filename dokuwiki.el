@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.3
+;; Version: 1.2.4
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -279,8 +279,6 @@ NAMESPACE is nil for top-level pages (e.g. buffer \"start.dwiki\")."
 (defun dokuwiki--with-xmlrpc-http-session (fn)
   "Call FN while using DokuWiki's XML-RPC cookie login, not HTTP Basic auth.
 DokuWiki often answers HTTP Basic (from auth-source) with 403 on xmlrpc.php."
-  (require 'url-cookie)
-  (url-cookie-setup)
   (cl-letf (((symbol-function 'url-get-authentication)
              (lambda (&rest _args) nil)))
     (let ((url-http-real-basic-auth-storage nil)
@@ -363,20 +361,17 @@ Returns the result of the XML-RPC call, or nil if the login failed."
 
 (defun dokuwiki--xmlrpc-call (method &rest params)
   "Call XML-RPC METHOD with PARAMS, logging in once if needed."
-  (let ((rpc-url (dokuwiki--get-xml-rpc-url))
-        (authenticated nil))
-    (while t
-      (condition-case err
-          (cl-return
-           (apply #'dokuwiki--xmlrpc-method-call rpc-url method params))
-        (error
-         (if (and (not authenticated) (dokuwiki--rpc-auth-error-p err))
-             (progn
-               (setq authenticated t)
-               (message "Authentication required. Logging in...")
-               (unless (dokuwiki--xmlrpc-authenticate)
-                 (error "Login unsuccessful! Check dokuwiki-xml-rpc-url and credentials")))
-           (signal (car err) (cdr err))))))))
+  (let ((rpc-url (dokuwiki--get-xml-rpc-url)))
+    (condition-case err
+        (apply #'dokuwiki--xmlrpc-method-call rpc-url method params)
+      (error
+       (if (dokuwiki--rpc-auth-error-p err)
+           (progn
+             (message "Authentication required. Logging in...")
+             (unless (dokuwiki--xmlrpc-authenticate)
+               (error "Login unsuccessful! Check dokuwiki-xml-rpc-url and credentials"))
+             (apply #'dokuwiki--xmlrpc-method-call rpc-url method params))
+         (signal (car err) (cdr err)))))))
 
 (defun dokuwiki--create-preferred-mode-maps ()
   "Create keymaps for editing a page with a particular mode by
