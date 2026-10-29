@@ -64,7 +64,7 @@ please.
    - wrap `dokuwiki-launch` with your wiki settings, e.g. `my-wiki`
    - optionally add credentials to `~/.authinfo` (example
      [below](#auth-source-credentials))
-   - see `dokuwiki-open-page-hook` to setup buffer
+   - see `dokuwiki-page-opened-hook` to setup buffer
 2. <kbd>M-x my-wiki</kbd> as defined above
 3. select page, edit, and save
    - <kbd>C-c g</kbd> `dokuwiki-list-pages-cached` - menu to select page to edit (prefix with <kbd>C-u</kbd> to refresh cached page list)
