@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.7
+;; Version: 1.2.8
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -372,10 +372,14 @@ Returns the result of the XML-RPC call, or nil if the login failed."
                                 password))
 
 (defun dokuwiki--rpc-auth-error-p (err)
-  "Return t if ERR looks like an HTTP or XML-RPC auth failure."
-  (string-match
-   "401\\|403\\|Unauthorized\\|Forbidden\\|not authorized to call"
-   (error-message-string err)))
+  "Return t if ERR means the XML-RPC session is not authenticated.
+DokuWiki uses \"not authorized to call\" before login and \"forbidden to
+call the method\" when logged in but ACL denies the method; only the
+former should trigger a login retry."
+  (let ((msg (error-message-string err)))
+    (and (not (string-match "forbidden to call the method" msg))
+         (or (string-match "Error during request: 401" msg)
+             (string-match "not authorized to call method" msg)))))
 
 (defun dokuwiki--xmlrpc-call (method &rest params)
   "Call XML-RPC METHOD with PARAMS, logging in once if needed."

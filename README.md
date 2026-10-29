@@ -103,6 +103,18 @@ machine www.mywiki.com login myuser password correct-horse-battery-stapler port 
 
 You might need to <kbd>M-x auth-source-forget-all-cached</kbd> for emacs to see changes.
 
+For encrypted auth files, point `auth-sources` at the `.gpg` file only, e.g.
+`(setq auth-sources '(( "~/.ssh/.authinfo.gpg" :host t :user t :port t)))`.
+
+#### XML-RPC permissions on the wiki
+
+If login succeeds but calls fail with **forbidden to call the method**, the
+account is authenticated but DokuWiki ACL denies that API method. An admin must
+enable the remote API and grant the user read/write access to the relevant
+pages (see [DokuWiki remote API](https://www.dokuwiki.org/devel:xmlrpc)). Until
+`wiki.getAllPages` works, use <kbd>M-x dokuwiki-open-page</kbd> with a known
+page id instead of the page list.
+
 ### Opening a page
 
 Use the function `dokuwiki-list-pages` to list the wiki pages available.
