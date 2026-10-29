@@ -9,7 +9,7 @@
 
 ;; Author: Juan Karlo Licudine <accidentalrebel@gmail.com>
 ;; URL: http://www.github.com/accidentalrebel/emacs-dokuwiki
-;; Version: 1.2.2
+;; Version: 1.2.3
 ;; Keywords: convenience
 ;; Package-Requires: ((emacs "24.3") (xml-rpc "1.6.8"))
 
@@ -276,43 +276,107 @@ NAMESPACE is nil for top-level pages (e.g. buffer \"start.dwiki\")."
   (insert (concat "[[" (completing-read "Select a page to link: " (dokuwiki-get-page-list)) "]]")))
 
 ;; Helpers
+(defun dokuwiki--with-xmlrpc-http-session (fn)
+  "Call FN while using DokuWiki's XML-RPC cookie login, not HTTP Basic auth.
+DokuWiki often answers HTTP Basic (from auth-source) with 403 on xmlrpc.php."
+  (require 'url-cookie)
+  (url-cookie-setup)
+  (cl-letf (((symbol-function 'url-get-authentication)
+             (lambda (&rest _args) nil)))
+    (let ((url-http-real-basic-auth-storage nil)
+          (url-http-proxy-basic-auth-storage nil))
+      (funcall fn))))
+
+(defun dokuwiki--xmlrpc-build-call (method params)
+  "Build an XML-RPC `methodCall' tree for METHOD and PARAMS."
+  (let* ((m-name (if (stringp method) method (symbol-name method)))
+         (m-params
+          (mapcar (lambda (p)
+                    `(param nil ,(car (xml-rpc-value-to-xml-list p))))
+                  params)))
+    `((methodCall nil (methodName nil ,m-name)
+                   ,(append '(params nil) m-params)))))
+
+(defun dokuwiki--xmlrpc-request (server-url xml)
+  "POST XML to SERVER-URL like `xml-rpc-request', but parse XML on HTTP 401/403."
+  (dokuwiki--with-xmlrpc-http-session
+   (lambda ()
+     (let ((url-request-method "POST")
+           (url-package-name "xml-rpc.el")
+           (url-package-version xml-rpc-version)
+           (url-request-data
+            (concat "<?xml version=\"1.0\""
+                    " encoding=\"UTF-8\"?>\n"
+                    (with-temp-buffer
+                      (xml-print xml)
+                      (if xml-rpc-allow-unicode-string
+                          (encode-coding-string
+                           (encode-coding-string (buffer-string) 'utf-8)
+                           'raw-text t)
+                        (buffer-string)))
+                    "\n"))
+           (url-mime-charset-string "utf-8;q=1, iso-8859-1;q=0.5")
+           (url-request-coding-system xml-rpc-use-coding-system)
+           (url-http-attempt-keepalives t)
+           (url-request-extra-headers
+            (append
+             (list (cons "Connection" "close")
+                   (cons "Content-Type" "text/xml; charset=utf-8"))
+             xml-rpc-request-extra-headers))
+           (buffer (url-retrieve-synchronously server-url)))
+       (with-current-buffer buffer
+         (when (and (numberp url-http-response-status)
+                    (> url-http-response-status 299)
+                    (not (save-excursion
+                           (goto-char (point-min))
+                           (or (search-forward "<methodResponse>" nil t)
+                               (search-forward "<?xml" nil t)))))
+           (error "Error during request: %s" url-http-response-status)))
+       (xml-rpc-request-process-buffer buffer)))))
+
+(defun dokuwiki--xmlrpc-method-call (server-url method &rest params)
+  "Call METHOD at SERVER-URL via `dokuwiki--xmlrpc-request'."
+  (let ((response
+         (dokuwiki--xmlrpc-request
+          server-url
+          (dokuwiki--xmlrpc-build-call method params))))
+    (cond ((stringp response)
+           (list (cons nil (concat "URL/HTTP Error: " response))))
+          (t
+           (xml-rpc-xml-to-response response)))))
+
 (defun dokuwiki--xmlrpc-login (username password)
   "Login to the Dokuwiki XML-RPC API.
 USERNAME is the username to use for logging in.
 PASSWORD is the password to use for logging in.
 Returns the result of the XML-RPC call, or nil if the login failed."
-  (xml-rpc-method-call (dokuwiki--get-xml-rpc-url)
-                       'dokuwiki.login
-                       username
-                       password))
+  (dokuwiki--xmlrpc-method-call (dokuwiki--get-xml-rpc-url)
+                                'dokuwiki.login
+                                username
+                                password))
+
+(defun dokuwiki--rpc-auth-error-p (err)
+  "Return t if ERR looks like an XML-RPC or HTTP auth failure."
+  (string-match
+   "401\\|403\\|Unauthorized\\|Forbidden\\|not authorized\\|XML-RPC fault"
+   (error-message-string err)))
 
 (defun dokuwiki--xmlrpc-call (method &rest params)
-  "Call XML-RPC method with optional authentication disabling.
-
-METHOD is the XML-RPC method to call (e.g. 'wiki.getPage).
-PARAMS are the optional parameters to pass to the method as multiple arguments.
-
-Returns the result of xml-rpc-method-call."
+  "Call XML-RPC METHOD with PARAMS, logging in once if needed."
   (let ((rpc-url (dokuwiki--get-xml-rpc-url))
-        (call-func nil))
-    (setq call-func
-          (lambda ()
-            (apply #'xml-rpc-method-call (cons rpc-url (cons method params)))))
-    ;; nullify 'url-get-authentication' to avoid authentication prompts
-    (cl-letf (((symbol-function 'url-get-authentication)
-               (lambda (&rest _args) nil)))
-             (condition-case err
-                             ;; First try
-                             (funcall call-func)
-                             (error
-                               (if (string-match "401\\|403\\|Unauthorized\\|Forbidden"
-                                                 (error-message-string err))
-                                 (progn
-                                   (message "Authentication required. Logging in...")
-                                   (unless (dokuwiki--xmlrpc-authenticate)
-                                     (error "Login unsuccessful! Check dokuwiki-xml-rpc-url and credentials"))
-                                   (funcall call-func))
-                                 (signal (car err) (cdr err))))))))
+        (authenticated nil))
+    (while t
+      (condition-case err
+          (cl-return
+           (apply #'dokuwiki--xmlrpc-method-call rpc-url method params))
+        (error
+         (if (and (not authenticated) (dokuwiki--rpc-auth-error-p err))
+             (progn
+               (setq authenticated t)
+               (message "Authentication required. Logging in...")
+               (unless (dokuwiki--xmlrpc-authenticate)
+                 (error "Login unsuccessful! Check dokuwiki-xml-rpc-url and credentials")))
+           (signal (car err) (cdr err))))))))
 
 (defun dokuwiki--create-preferred-mode-maps ()
   "Create keymaps for editing a page with a particular mode by
